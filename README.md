@@ -1,4 +1,6 @@
-# Autograd-Feature-Lab
+# Autograd Feature Lab
+
+이 프로젝트는 `deep_learning_2025` 저장소의 예제들을 하나의 **실험형 프로젝트**로 엮은 것입니다. PyTorch의 텐서 속성, autograd, 그래디언트 흐름을 직접 만지고 관찰하며, 간단한 **특징 학습(feature learning)** 모델까지 이어집니다. 교재처럼 읽는 코드가 아니라, 실험실처럼 눌러보고 흔들어보는 구조입니다.
 
 ## 프로젝트 목표
 
@@ -42,33 +44,162 @@ pip install torch torchvision
 
 ## 실험 1: Autograd Playground
 
-아래 순서대로 스크립트를 실행하며 출력과 gradient 변화를 관찰합니다.
+아래 순서대로 스크립트를 실행하며 출력과 gradient 변화를 관찰합니다. 각 스크립트는 **짧은 코드 + 명확한 실험 포인트**로 구성되어 있습니다.
 
-1. 기본 backward와 스칼라 미분
-2. gradient 누적과 초기화 시점
-3. `retain_graph=True`의 의미
-4. `detach`, `no_grad`의 차이
-5. 벡터 backward와 VJP의 직관
+### 1. 기본 backward와 스칼라 미분
 
-```bash
-python 05_gradient_computation_01_basic_scalar_backward.py
+```python
+import torch
+
+x = torch.tensor(3.0, requires_grad=True)
+y = x ** 2 + 2 * x
+
+y.backward()
+print(x.grad)  # dy/dx = 2x + 2 = 8
 ```
 
-각 파일은 **하나의 질문**을 던지도록 설계되어 있습니다. 출력이 이해되면 다음 파일로 이동하세요.
+* `requires_grad=True`가 계산 그래프를 생성함
+* 스칼라 출력에 대해 `backward()`는 자동으로 1을 곱함
+
+### 2. Gradient 누적과 초기화
+
+```python
+x = torch.tensor(2.0, requires_grad=True)
+y1 = x ** 2
+y2 = 3 * x
+
+y1.backward()
+y2.backward()
+print(x.grad)  # 2x + 3 = 7
+
+x.grad.zero_()
+y2.backward()
+print(x.grad)  # 3
+```
+
+* `.grad`는 **누적(accumulate)** 된다
+* 반복 학습 시 반드시 zeroing 필요
+
+### 3. retain_graph의 의미
+
+```python
+x = torch.tensor(2.0, requires_grad=True)
+y = x ** 3
+
+for _ in range(2):
+    y.backward(retain_graph=True)
+    print(x.grad)
+```
+
+* 기본적으로 backward 이후 그래프는 삭제됨
+* 여러 번 미분하려면 `retain_graph=True`
+
+### 4. detach vs no_grad
+
+```python
+x = torch.tensor(2.0, requires_grad=True)
+y = x * 3
+
+z = y.detach()
+w = z ** 2
+print(w.requires_grad)  # False
+
+with torch.no_grad():
+    u = x ** 2
+```
+
+* `detach()`는 **그래프에서 분리된 텐서** 생성
+* `no_grad`는 **컨텍스트 전체에서 autograd 차단**
+
+### 5. 벡터 출력과 VJP
+
+```python
+x = torch.tensor([1.0, 2.0], requires_grad=True)
+y = x ** 2
+v = torch.tensor([1.0, 1.0])
+
+y.backward(v)
+print(x.grad)  # [2, 4]
+```
+
+* PyTorch는 Jacobian 전체가 아닌 **Vector-Jacobian Product**를 계산
+
+출력이 이해되면 다음 파일로 이동하세요.
 
 ## 실험 2: Tensor Feature Trainer
 
-`tensor_features` 폴더에서는 간단한 특징 추출 + 학습을 수행합니다.
+`tensor_features` 폴더에서는 간단한 **특징 추출 + 지도 학습**을 수행합니다.
 
-```bash
-python tensor_features/train.py
+### 데이터 로딩 (`load_data.py`)
+
+```python
+import torch
+
+def load_data(n=100):
+    x = torch.linspace(-1, 1, n).unsqueeze(1)
+    y = x ** 2 + 0.1 * torch.randn_like(x)
+    return x, y
 ```
 
-### 무엇을 관찰할까?
+* 입력: 1차원 연속 값
+* 타깃: 비선형 함수 + 노이즈
 
-* 입력 텐서가 feature로 변환되는 흐름
-* optimizer 없이 수동 업데이트 vs optimizer 사용
-* gradient accumulation을 사용할 때의 학습 안정성
+### Feature 추출 (`utils.py`)
+
+```python
+import torch
+
+def feature_map(x):
+    return torch.cat([x, x**2, x**3], dim=1)
+```
+
+* 선형 입력을 다항 feature로 확장
+* 이후 모델은 **선형 회귀**지만 전체는 비선형 모델
+
+### 학습 루프 (`train.py`)
+
+```python
+import torch
+from load_data import load_data
+from utils import feature_map
+
+x, y = load_data()
+phi = feature_map(x)
+
+w = torch.randn(phi.size(1), 1, requires_grad=True)
+
+lr = 0.1
+for epoch in range(100):
+    pred = phi @ w
+    loss = ((pred - y) ** 2).mean()
+
+    loss.backward()
+
+    with torch.no_grad():
+        w -= lr * w.grad
+        w.grad.zero_()
+
+    if epoch % 10 == 0:
+        print(f"Epoch {epoch}, Loss {loss.item():.4f}")
+```
+
+### 관찰 포인트
+
+* feature 차원이 늘어날수록 수렴 속도 변화
+* `no_grad`가 없으면 업데이트가 그래프에 포함됨
+* `.grad.zero_()`를 제거했을 때 발산 여부
+
+### Optimizer 버전 (선택)
+
+```python
+optimizer = torch.optim.SGD([w], lr=0.1)
+
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
+```
+
+수동 업데이트와 비교해 동작을 대조해보세요.
 
 ## 확장 아이디어
 
